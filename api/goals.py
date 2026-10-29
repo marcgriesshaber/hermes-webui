@@ -6,6 +6,7 @@ import copy
 import logging
 import re
 import time
+from api.goal_execution import serialized_goal_state
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -520,6 +521,7 @@ def restore_goal_state(session_id: str, snapshot: Any, *, profile_home: str | Pa
         logger.debug("Goal state restore failed for %s: %s", session_id, exc)
 
 
+@serialized_goal_state
 def goal_command_payload(
     session_id: str,
     args: str = "",
@@ -651,6 +653,7 @@ def has_active_goal(
         return False
 
 
+@serialized_goal_state
 def evaluate_goal_after_turn(
     session_id: str,
     last_response: str,

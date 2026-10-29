@@ -15296,6 +15296,14 @@ def handle_get(handler, parsed) -> bool:
         }
         return j(handler, {"git": info})
 
+    if parsed.path == "/api/goal/capabilities":
+        from api.goal_execution import capabilities
+        return j(handler, capabilities())
+
+    if parsed.path == "/api/commands/capabilities":
+        from api.command_dispatch import capabilities
+        return j(handler, capabilities())
+
     if parsed.path == "/api/commands":
         from api.commands import list_commands
         return j(handler, {"commands": list_commands()})
@@ -17789,6 +17797,10 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 400)
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
+
+    if parsed.path == "/api/commands/dispatch":
+        from api.command_dispatch import dispatch
+        return dispatch(handler, body)
 
     if parsed.path == "/api/commands/exec":
         from api.commands import execute_agent_command, execute_plugin_command
@@ -26160,7 +26172,19 @@ def _handle_session_compression_recovery_start(handler, body):
 
 
 def _handle_goal_command(handler, body):
+    from api.goal_execution import command_gate
+    with command_gate(str(body.get("session_id") or "")):
+        return _handle_goal_command_locked(handler, body)
+
+
+def _handle_goal_command_locked(handler, body):
     """Handle WebUI /goal command controls and optional kickoff stream."""
+    from api import goal_execution
+    execution = body.get("goal_execution", "client")
+    if execution not in ("client", "server"):
+        return bad(handler, "goal_execution must be client or server", 400)
+    if execution == "server" and not goal_execution.capabilities()["server_owned_goal_continuation"]:
+        return bad(handler, "Server goal continuation is unavailable for the runner backend", 501)
     try:
         require(body, "session_id")
     except ValueError as e:
@@ -26213,6 +26237,13 @@ def _handle_goal_command(handler, body):
 
     from api.goals import goal_command_payload, goal_state_snapshot, restore_goal_state
 
+    if execution == "server" and profile_home is None:
+        return bad(handler, "Cannot resolve the goal's owning profile", 409)
+    if (execution == "server" and requested_profile
+            and not _profiles_match(getattr(s, "profile", None), requested_profile)):
+        return _session_profile_mismatch_response(
+            handler, s.session_id, getattr(s, "profile", None))
+
     goal_args = str(body.get("args", "") or body.get("text", "") or "")
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
@@ -26235,9 +26266,12 @@ def _handle_goal_command(handler, body):
             ),
         }, status=501)
     goal_action = goal_args.strip().lower()
+    server_resume = execution == "server" and goal_action == "resume"
+    if server_resume and stream_running:
+        return bad(handler, "Stop the active stream before resuming server-owned goals", 409)
     will_kickoff = bool(
         goal_args.strip()
-        and goal_action not in ("status", "pause", "resume", "clear", "stop", "done")
+        and (server_resume or goal_action not in ("status", "pause", "resume", "clear", "stop", "done"))
         and not stream_running
     )
     workspace = model = model_provider = normalized_model = None
@@ -26356,6 +26390,12 @@ def _handle_goal_command(handler, body):
     if runner_goal_owned:
         return j(handler, payload)
 
+    if payload.get("action") in ("pause", "clear", "resume"):
+        goal_execution.revoke(s.session_id)
+    if server_resume and payload.get("goal", {}).get("status") == "active":
+        from api.goals import _manager
+        payload["kickoff_prompt"] = _manager(s.session_id, profile_home=profile_home).next_continuation_prompt()
+    payload["execution_owner"] = goal_execution.owner(s.session_id)
     kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
     if kickoff_prompt:
         if workspace is None:
@@ -26388,6 +26428,15 @@ def _handle_goal_command(handler, body):
             except Exception:
                 pass
         gateway_owned = webui_gateway_chat_enabled(get_config())
+        lease = None
+        if execution == "server":
+            lease = goal_execution.begin(s, profile_home, {
+                "workspace": workspace, "model": model, "model_provider": model_provider,
+                "normalized_model": normalized_model, "gateway_chat_enabled": gateway_owned,
+            })
+            payload["execution_owner"] = "server"
+        else:
+            goal_execution.revoke(s.session_id)
         try:
             stream_response = _start_run(
                 s,
@@ -26403,14 +26452,18 @@ def _handle_goal_command(handler, body):
                 goal_related=True,
             )
         except Exception:
+            goal_execution.revoke(s.session_id)
             _rollback_goal_after_failed_kickoff()
             raise
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
         if status >= 400:
+            goal_execution.revoke(s.session_id)
             _rollback_goal_after_failed_kickoff()
             payload["ok"] = False
             return j(handler, payload, status=status)
+        if lease is not None:
+            goal_execution.bind(s.session_id, lease, stream_response.get("stream_id"))
 
     return j(handler, payload)
 

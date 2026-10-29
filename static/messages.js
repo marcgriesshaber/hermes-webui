@@ -6355,6 +6355,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       try{
         const d=JSON.parse(e.data||'{}');
         const sid=d.session_id||activeSid;
+        if(d.execution_owner==='server')return;
         const continuation_prompt=String(d.continuation_prompt||d.text||'').trim();
         if(!continuation_prompt||sid!==activeSid)return;
         _applyToAnchor('goal_continue',d,e);

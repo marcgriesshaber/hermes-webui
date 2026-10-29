@@ -15141,11 +15141,13 @@ def _run_agent_streaming(
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        from api.goal_execution import continuation
+                        _goal_ownership = continuation(session_id, stream_id, continuation_prompt)
+                        if _goal_ownership['execution_owner'] == 'client':
+                            PENDING_GOAL_CONTINUATION.add(session_id)
                         put('goal_continue', {
                             'session_id': session_id,
-                            'continuation_prompt': continuation_prompt,
-                            'text': continuation_prompt,
+                            **_goal_ownership,
                             'message': _goal_message,
                             'message_key': decision.get('message_key') or 'goal_continuing',
                             'message_args': decision.get('message_args') or [],
@@ -15892,6 +15894,9 @@ def _run_agent_streaming(
             # the next stream can read it, breaking the goal-continuation
             # chain. Stage-326 critical fix per Opus advisor review.
 
+        from api.goal_execution import turn_finished
+        turn_finished(session_id, stream_id)
+
         # ── Defer-path fix: turn-teardown idle-hook ────────────────────────
         # The session has just transitioned active→idle: unregister_active_run
         # above cleared this stream's ACTIVE_RUNS row (under ACTIVE_RUNS_LOCK,
@@ -16144,6 +16149,9 @@ def cancel_stream(stream_id: str) -> bool:
     ordering (streaming thread does LOCK → STREAMS_LOCK; inverting would deadlock).
     """
     from api import config as _live_config
+
+    from api.goal_execution import cancel_owned_stream
+    cancel_owned_stream(stream_id)
 
     # Use module-level aliases (imported from api.config at startup).
     # In production these are always the same objects as api.config.STREAMS etc.

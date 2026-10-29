@@ -2559,11 +2559,13 @@ def _run_gateway_chat_streaming(
                 if decision.get("should_continue"):
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     if continuation_prompt:
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        from api.goal_execution import continuation
+                        goal_ownership = continuation(session_id, stream_id, continuation_prompt)
+                        if goal_ownership["execution_owner"] == "client":
+                            PENDING_GOAL_CONTINUATION.add(session_id)
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,
-                            "continuation_prompt": continuation_prompt,
-                            "text": continuation_prompt,
+                            **goal_ownership,
                             "message": goal_message,
                             "message_key": decision.get("message_key") or "goal_continuing",
                             "message_args": decision.get("message_args") or [],
@@ -2636,3 +2638,5 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        from api.goal_execution import turn_finished
+        turn_finished(session_id, stream_id)
